@@ -5,7 +5,7 @@ const fileUpload = require("express-fileupload");
 const bcrypt = require("bcrypt");
 
 const app = express();
-
+app.use("/uploads", express.static(__dirname + "/uploads"));
 app.use("/api", require("./userweb"));
 
 app.use((req, res, next) => {
@@ -28,32 +28,59 @@ app.get("/", (req, res) => {
 
 app.post("/insertUser", async (req, res) => {
   try {
-    const { first_name, last_name, phone, password, email } = req.body;
+    const { first_name, last_name, phone, password, email, authid } = req.body;
 
-    const requiredFields = ["first_name", "last_name", "phone", "password"];
-    for (let field of requiredFields) {
-      if (!req.body[field]) {
-        return res
-          .status(400)
-          .json({
-            status: false,
-            message: `${field.replace("_", " ")} is required.`,
-          });
+    if (authid) {
+      const [userAlready] = await db.execute(
+        "SELECT * FROM users WHERE reference_code = ?",
+        [authid]
+      );
+      if (userAlready.length > 0) {
+        return res.status(200).json({
+          status: true,
+          message: "Login successfully.",
+          details: userAlready[0],
+        });
       }
     }
 
-    const [existingUsers] = await db.execute(
-      "SELECT * FROM users WHERE phone = ? OR email = ?",
-      [phone, email || null]
-    );
-
-    if (existingUsers.length > 0) {
-      return res
-        .status(400)
-        .json({
+    const requiredFields = ["first_name", "last_name", "password"];
+    for (let field of requiredFields) {
+      if (!req.body[field]) {
+        return res.status(400).json({
           status: false,
-          message: "Phone or email is already registered.",
+          message: `${field.replace("_", " ")} is required.`,
         });
+      }
+    }
+
+    if (phone) {
+      const [existingUsers] = await db.execute(
+        "SELECT * FROM users WHERE phone = ?",
+        [phone]
+      );
+      if (existingUsers.length > 0) {
+        return res.status(400).json({
+          status: false,
+          message: "Phone is already registered.",
+        });
+      }
+    }
+
+    if (email) {
+      const [emailAlready] = await db.execute(
+        "SELECT * FROM users WHERE email = ?",
+        [email]
+      );
+
+      if (emailAlready.length > 0) {
+        if (!authid) {
+          return res.status(400).json({
+            status: false,
+            message: "Email is already registered.",
+          });
+        }
+      }
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -69,14 +96,26 @@ app.post("/insertUser", async (req, res) => {
       req.files.profile_picture.mv(targetFilePath);
     }
 
-    let columns = ["first_name", "last_name", "phone", "password"];
-    let placeholders = ["?", "?", "?", "?"];
-    let values = [first_name, last_name, phone, hashedPassword];
+    let columns = ["first_name", "last_name", "password"];
+    let placeholders = ["?", "?", "?"];
+    let values = [first_name, last_name, hashedPassword];
 
     if (email) {
       columns.push("email");
       placeholders.push("?");
       values.push(email);
+    }
+
+    if (phone) {
+      columns.push("phone");
+      placeholders.push("?");
+      values.push(phone);
+    }
+
+    if (authid) {
+      columns.push("reference_code");
+      placeholders.push("?");
+      values.push(authid);
     }
 
     if (profilePicture) {
@@ -90,11 +129,25 @@ app.post("/insertUser", async (req, res) => {
             VALUES (${placeholders.join(", ")})
         `;
 
-    const [results] = await db.execute(query, values);
+    await db.execute(query, values);
+
+    if (authid) {
+      const [userAlready] = await db.execute(
+        "SELECT * FROM users WHERE reference_code = ?",
+        [authid]
+      );
+      if (userAlready.length > 0) {
+        return res.status(200).json({
+          status: true,
+          message: "Signup successfully.",
+          details: userAlready[0],
+        });
+      }
+    }
 
     res.json({
       status: true,
-      message: "User registered successfully.",
+      message: "Signup successfully.",
     });
   } catch (error) {
     res.status(500).json({
@@ -120,12 +173,10 @@ app.post("/editProfile", async (req, res) => {
     );
 
     if (existingUsers.length <= 0) {
-      return res
-        .status(400)
-        .json({
-          status: false,
-          message: "User not found with the given phone number.",
-        });
+      return res.status(400).json({
+        status: false,
+        message: "User not found with the given phone number.",
+      });
     }
 
     let updates = [];
@@ -146,7 +197,7 @@ app.post("/editProfile", async (req, res) => {
 
     if (profilePicture) {
       req.files.profile_picture.mv(targetFilePath);
-      updates.push(`profile_picture='${targetFilePath}'`);
+      updates.push(`profile='${targetFilePath}'`);
     }
 
     if (updates.length) {
@@ -227,14 +278,16 @@ app.get("/books", async (req, res) => {
     const [categories] = await db.execute(
       "SELECT id, category_name FROM ebookcategory"
     );
-    let response = {};
+    let response = [];
 
     for (let category of categories) {
       const [books] = await db.execute(
         "SELECT * FROM ebooks WHERE ebook_cate = ?",
         [category.id]
       );
-      response[category.category_name] = books;
+      response.push({
+        [category.category_name]: books,
+      });
     }
 
     res.status(200).json({
